@@ -1,4 +1,4 @@
-
+// server.js
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -9,6 +9,7 @@ const path = require('path');
 const app = express();
 const PORT = 3000;
 
+// ====== Базові налаштування ======
 app.use(cors());
 app.use(express.json());
 
@@ -24,14 +25,18 @@ const COMPRESSED_DIR = path.join(UPLOADS_DIR, 'compressed');
   }
 });
 
-// Роздача статичних файлів (щоб фронт міг показувати картинки по URL)
+// Роздача статичних файлів
 app.use('/uploads', express.static(UPLOADS_DIR));
 
-// завантаження файлів в памʼять
+// Папка з фронтендом
+const PUBLIC_DIR = path.join(__dirname, 'public');
+app.use(express.static(PUBLIC_DIR));
+
+// ====== Multer (завантаження файлів у памʼять) ======
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
-// Допоміжні функції 
+// ====== Допоміжні функції ======
 
 // Обчислення PSNR між двома буферами raw RGBA однакового розміру
 function computePSNR(buf1, buf2) {
@@ -45,29 +50,33 @@ function computePSNR(buf1, buf2) {
     const rDiff = buf1[i]     - buf2[i];
     const gDiff = buf1[i + 1] - buf2[i + 1];
     const bDiff = buf1[i + 2] - buf2[i + 2];
-    // альфа (i + 3) можна ігнорити для PSNR
+    // альфа (i + 3) ігноруємо
 
     mse += rDiff * rDiff + gDiff * gDiff + bDiff * bDiff;
   }
 
   const pixels = buf1.length / 4;
-  // 3 канали (R,G,B)
   mse /= (pixels * 3);
 
-  if (mse === 0) {
-    return Infinity; 
-  }
+  if (mse === 0) return Infinity;
 
   const MAX_I = 255;
   const psnr = 10 * Math.log10((MAX_I * MAX_I) / mse);
   return psnr;
 }
 
+// Перетворення якості 0..1 у 0..100
 function qualityToPercent(q) {
   if (q <= 1) return Math.round(q * 100);
   return Math.round(q);
 }
 
+// ====== Маршрут: compress ======
+//
+// POST /api/compress
+// image: файл зображення (будь-який формат, який підтримує sharp)
+// config (опційно): JSON-рядок з масивом варіантів
+//
 app.post('/api/compress', upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
@@ -78,17 +87,15 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
     const originalName = req.file.originalname || 'image';
     const baseName = Date.now() + '-' + Math.round(Math.random() * 1e9);
 
-    // Зчитуємо оригінал через sharp
+    // Зчитуємо оригінал через sharp (будь-який формат)
     const originalSharp = sharp(fileBuffer);
     const metadata = await originalSharp.metadata();
 
-    // Зберігаємо оригінал у PNG (щоб було стабільно)
+    // Зберігаємо оригінал у PNG як "еталон" (стабільно і без втрат)
     const originalFileName = baseName + '-original.png';
     const originalFilePath = path.join(ORIGINAL_DIR, originalFileName);
 
-    await originalSharp
-      .png()
-      .toFile(originalFilePath);
+    await originalSharp.png().toFile(originalFilePath);
 
     const originalStats = fs.statSync(originalFilePath);
     const originalSize = originalStats.size;
@@ -99,7 +106,7 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
       .ensureAlpha()
       .toBuffer({ resolveWithObject: true });
 
-    // Парсимо config (якщо фронт щось передав)
+    // Конфіг методів стиснення
     let variantsConfig = null;
     if (req.body.config) {
       try {
@@ -109,15 +116,22 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
       }
     }
 
-    // Якщо нічого не передали – дефолтний набір
+    // Якщо нічого не передали – дефолтний набір:
+    // Lossey: JPEG, WebP, AVIF
+    // Lossless: PNG
     if (!Array.isArray(variantsConfig) || variantsConfig.length === 0) {
       variantsConfig = [
-        { format: 'jpeg', quality: 0.2, label: 'JPEG (якість 0.2)' },
-        { format: 'jpeg', quality: 0.5, label: 'JPEG (якість 0.5)' },
-        { format: 'jpeg', quality: 0.8, label: 'JPEG (якість 0.8)' },
-        { format: 'png',  quality: 1.0, label: 'PNG (без втрат)' },
-        { format: 'webp', quality: 0.5, label: 'WebP (якість 0.5)' },
-        { format: 'webp', quality: 0.8, label: 'WebP (якість 0.8)' }
+        { format: 'jpeg', quality: 0.2, label: 'JPEG (якість 0.2)', lossType: 'lossy' },
+        { format: 'jpeg', quality: 0.5, label: 'JPEG (якість 0.5)', lossType: 'lossy' },
+        { format: 'jpeg', quality: 0.8, label: 'JPEG (якість 0.8)', lossType: 'lossy' },
+
+        { format: 'webp', quality: 0.5, label: 'WebP (якість 0.5)', lossType: 'lossy' },
+        { format: 'webp', quality: 0.8, label: 'WebP (якість 0.8)', lossType: 'lossy' },
+
+        { format: 'avif', quality: 0.5, label: 'AVIF (якість 0.5)', lossType: 'lossy' },
+        { format: 'avif', quality: 0.8, label: 'AVIF (якість 0.8)', lossType: 'lossy' },
+
+        { format: 'png',  quality: 1.0, label: 'PNG (без втрат)', lossType: 'lossless' }
       ];
     }
 
@@ -129,42 +143,39 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
       const label = cfg.label || `${format.toUpperCase()} (quality=${cfg.quality || 0.8})`;
       const q = cfg.quality != null ? cfg.quality : 0.8;
       const qualityPercent = qualityToPercent(q);
+      const lossType = cfg.lossType || inferLossType(format);
 
       const outFileName = `${baseName}-${format}-${qualityPercent}.` +
         (format === 'jpeg' ? 'jpg' : format);
 
       const outFilePath = path.join(COMPRESSED_DIR, outFileName);
 
-      // Створюємо sharp-обробку
       let pipeline = sharp(fileBuffer);
 
       if (format === 'jpeg') {
         pipeline = pipeline.jpeg({ quality: qualityPercent });
       } else if (format === 'png') {
-        // для PNG quality особливо не впливає (без втрат), але можна
-        pipeline = pipeline.png();
+        pipeline = pipeline.png(); // PNG — без втрат
       } else if (format === 'webp') {
         pipeline = pipeline.webp({ quality: qualityPercent });
+      } else if (format === 'avif') {
+        pipeline = pipeline.avif({ quality: qualityPercent });
       } else {
-        // якщо невідомий формат – скіпаємо
+        // невідомий формат – пропускаємо
         continue;
       }
 
-      // Зберігаємо стиснуте зображення у файл
       await pipeline.toFile(outFilePath);
 
-      // Читаємо розмір файлу
       const stat = fs.statSync(outFilePath);
       const size = stat.size;
       const compressionRatio = originalSize / size;
 
-      // Для PSNR потрібно зчитати стиснуте як raw RGBA
       const { data: compressedRaw } = await sharp(outFilePath)
         .raw()
         .ensureAlpha()
         .toBuffer({ resolveWithObject: true });
 
-      // PSNR (якщо ракурси/розмір співпали)
       let psnr = null;
       if (
         compressedRaw.length === originalRaw.length &&
@@ -174,23 +185,19 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
         psnr = computePSNR(originalRaw, compressedRaw);
       }
 
-      // URL для фронтенда (Express віддає /uploads)
-      const publicUrl = `/uploads/compressed/${outFileName}`;
-      const originalUrl = `/uploads/original/${originalFileName}`;
-
       results.push({
         label,
         format,
         quality: qualityPercent,
         fileName: outFileName,
-        url: publicUrl,
+        url: `/uploads/compressed/${outFileName}`,
         size,
         compressionRatio,
-        psnr
+        psnr,
+        lossType // 'lossy' або 'lossless'
       });
     }
 
-    // Відповідь клієнту
     res.json({
       original: {
         fileName: originalFileName,
@@ -203,15 +210,22 @@ app.post('/api/compress', upload.single('image'), async (req, res) => {
       },
       variants: results
     });
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Внутрішня помилка сервера' });
   }
 });
 
+// Визначення типу стиснення за форматом (як запасний варіант)
+function inferLossType(format) {
+  const f = format.toLowerCase();
+  if (f === 'png') return 'lossless';
+  // кодуємо WebP/AVIF/JPEG як lossy за замовчуванням
+  return 'lossy';
+}
+
 // Простіший ping для перевірки
-app.get('/', (req, res) => {
+app.get('/ping', (req, res) => {
   res.send('Image Compressor Lab backend працює 🚀');
 });
 
